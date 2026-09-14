@@ -116,3 +116,5 @@ The HTTP API may also return:
 python -m pip install -e ".[dev]"
 python -m pytest
 ```
+
+A container demo that hits the live API lives in [`demo/`](demo/).
