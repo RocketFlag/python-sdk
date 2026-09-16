@@ -1,0 +1,46 @@
+name: Publish to PyPI
+
+# Publish the rocketflag package when a GitHub Release is published.
+# Uses Trusted Publishing (OIDC) — no long-lived PyPI token in GitHub secrets.
+# Configure once on PyPI: Publishing → Trusted publishers → GitHub
+#   Owner: RocketFlag, Repository: python-sdk, Workflow: pypi-publish.yml, Environment: pypi
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install build
+        run: python -m pip install --upgrade pip build
+      - name: Build sdist and wheel
+        run: python -m build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: python-package-distributions
+          path: dist/
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/rocketflag
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: python-package-distributions
+          path: dist/
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
