@@ -10,7 +10,7 @@ pip install rocketflag
 
 Python 3.9+. No third-party runtime dependencies.
 
-Until the package is on PyPI:
+Published releases go to [PyPI](https://pypi.org/project/rocketflag/) via GitHub Releases. For an unreleased commit:
 
 ```bash
 pip install git+https://github.com/RocketFlag/python-sdk.git
