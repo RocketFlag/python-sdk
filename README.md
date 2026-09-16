@@ -1,5 +1,4 @@
-ok, length 3088
-hon SDK
+# RocketFlag Python SDK
 
 Official Python SDK for [RocketFlag](https://rocketflag.app). Same evaluation API as the [Node](https://github.com/RocketFlag/node-sdk) and [Go](https://github.com/RocketFlag/go-sdk) SDKs: create a client, fetch a flag, branch on `flag.enabled`.
 
