@@ -6,6 +6,7 @@ from urllib.parse import parse_qs, urlparse
 import pytest
 
 from rocketflag import (
+    DEFAULT_MAX_CACHE_ENTRIES,
     APIError,
     Client,
     Flag,
@@ -127,10 +128,136 @@ def test_requires_flag_id():
         client.get_flag("")
 
 
-def test_env_must_be_alphanumeric():
-    client = create_client()
-    with pytest.raises(ValueError, match="alphanumeric"):
-        client.get_flag("abc", {"env": "prod-1"})
+class StubResponse:
+    status = 200
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def read(self):
+        return flag_json()
+
+
+class StubOpener:
+    """Answers every request with a flag, recording the URLs it was asked for."""
+
+    def __init__(self):
+        self.urls = []
+
+    def open(self, request):
+        self.urls.append(request.full_url)
+        return StubResponse()
+
+
+def test_passes_targeting_key_and_audience_attributes(server):
+    base, handler = server
+    seen = {}
+
+    def body(parsed):
+        seen["query"] = parse_qs(parsed.query, keep_blank_values=True)
+        return flag_json(), 200
+
+    handler.responses["/v1/flags/abc123"] = (body, 200)
+    client = Client(api_url=base)
+    client.get_flag("abc123", {"targetingKey": "user-42", "plan": "pro", "country": "AU", "seats": 5, "beta": True})
+    assert seen["query"] == {
+        "targetingKey": ["user-42"],
+        "plan": ["pro"],
+        "country": ["AU"],
+        "seats": ["5"],
+        "beta": ["true"],
+    }
+
+
+def test_none_value_is_rejected():
+    opener = StubOpener()
+    client = Client(opener=opener)
+    with pytest.raises(ValueError, match="Invalid value for key: plan"):
+        client.get_flag("abc", {"plan": None})
+    assert opener.urls == []
+
+
+@pytest.mark.parametrize("env", ["prod", "prod-portals", "staging_v2", "production1"])
+def test_env_accepts_letters_numbers_hyphens_and_underscores(env):
+    opener = StubOpener()
+    client = Client(opener=opener)
+    client.get_flag("abc", {"env": env})
+    assert opener.urls == [f"https://api.rocketflag.app/v1/flags/abc?env={env}"]
+
+
+@pytest.mark.parametrize("env", ["prod 1", "prod.1", "prod!", "prod\n", "", True, 5])
+def test_env_rejects_other_characters(env):
+    opener = StubOpener()
+    client = Client(opener=opener)
+    with pytest.raises(ValueError, match="env values may only contain letters, numbers, hyphens and underscores"):
+        client.get_flag("abc", {"env": env})
+    assert opener.urls == []
+
+
+def test_cache_evicts_least_recently_used_when_full():
+    opener = StubOpener()
+    client = Client(ttl_seconds=60, max_entries=2, opener=opener)
+    client.get_flag("abc", {"targetingKey": "a"})
+    client.get_flag("abc", {"targetingKey": "b"})
+    client.get_flag("abc", {"targetingKey": "a"})  # hit, so "b" is now least recently used
+    assert len(opener.urls) == 2
+
+    client.get_flag("abc", {"targetingKey": "c"})  # evicts "b"
+    client.get_flag("abc", {"targetingKey": "a"})
+    assert len(opener.urls) == 3
+
+    client.get_flag("abc", {"targetingKey": "b"})
+    assert len(opener.urls) == 4
+
+
+def test_cache_holds_10000_entries_by_default():
+    assert DEFAULT_MAX_CACHE_ENTRIES == 10_000
+    opener = StubOpener()
+    client = Client(ttl_seconds=60, opener=opener)
+    for i in range(10_001):
+        client.get_flag("abc", {"targetingKey": f"user-{i}"})
+    assert len(opener.urls) == 10_001
+
+    client.get_flag("abc", {"targetingKey": "user-10000"})
+    assert len(opener.urls) == 10_001
+    client.get_flag("abc", {"targetingKey": "user-0"})
+    assert len(opener.urls) == 10_002
+
+
+def test_cache_is_safe_under_concurrent_use():
+    opener = StubOpener()
+    client = Client(ttl_seconds=60, max_entries=8, opener=opener)
+    errors = []
+
+    def worker(n):
+        try:
+            for i in range(500):
+                client.get_flag("abc", {"targetingKey": f"user-{(n * i) % 20}"})
+        except Exception as exc:  # pragma: no cover - surfaced by the assert below
+            errors.append(exc)
+
+    threads = [threading.Thread(target=worker, args=(n,)) for n in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert errors == []
+    assert len(client._cache) <= 8
+
+
+@pytest.mark.parametrize("max_entries", [0, -1, 1.5, True, "10"])
+def test_max_entries_must_be_a_positive_integer(max_entries):
+    with pytest.raises(ValueError, match="max_entries must be a positive integer"):
+        Client(max_entries=max_entries)
+
+
+def test_create_client_passes_max_entries():
+    with pytest.raises(ValueError, match="max_entries must be a positive integer"):
+        create_client(max_entries=0)
 
 
 def test_network_error():

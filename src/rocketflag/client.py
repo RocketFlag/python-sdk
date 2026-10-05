@@ -1,18 +1,21 @@
 """RocketFlag evaluation client.
 
 Mirrors the Node and Go SDKs: GET {api_url}/{version}/flags/{flag_id}
-with optional query-string user context (cohort, env, …) and an opt-in
-in-memory TTL cache keyed by flag ID + context.
+with optional query-string user context (cohort, env, targetingKey and
+audience attributes) and an opt-in in-memory TTL cache keyed by flag ID +
+context, capped at a maximum number of entries.
 """
 
 from __future__ import annotations
 
 import json
 import re
+import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Any, Mapping, Optional, Union
 
@@ -20,9 +23,13 @@ from .errors import APIError, InvalidResponseError, NetworkError
 
 DEFAULT_API_URL = "https://api.rocketflag.app"
 DEFAULT_VERSION = "v1"
-_ALPHANUMERIC = re.compile(r"^[a-zA-Z0-9]+$")
+DEFAULT_MAX_CACHE_ENTRIES = 10_000
+_ENV_NAME = re.compile(r"[A-Za-z0-9_-]+")
 
 ContextValue = Union[str, int, float, bool]
+# Every key is sent as a query parameter: cohort, env, targetingKey (a stable
+# user identifier that makes percentage rollouts sticky) and any other key as
+# an audience attribute. None is not a value; leave the key out instead.
 UserContext = Mapping[str, ContextValue]
 
 
@@ -48,12 +55,12 @@ def _validate_flag(payload: Any) -> Flag:
 
 def _validate_context(user_context: UserContext) -> None:
     for key, value in user_context.items():
-        if isinstance(value, bool):
-            continue
-        if isinstance(value, (str, int, float)):
-            if key == "env":
-                if not isinstance(value, str) or not _ALPHANUMERIC.match(value):
-                    raise ValueError(f"env values must be alphanumeric. Invalid value for env: {value!r}")
+        if isinstance(value, (str, int, float)):  # bool is an int
+            if key == "env" and (not isinstance(value, str) or not _ENV_NAME.fullmatch(value)):
+                raise ValueError(
+                    "env values may only contain letters, numbers, hyphens and underscores. "
+                    f"Invalid value for env: {value!r}"
+                )
             continue
         raise ValueError(
             f"userContext values must be of type str, int, float, or bool. Invalid value for key: {key}"
@@ -75,12 +82,18 @@ class Client:
         api_url: str = DEFAULT_API_URL,
         *,
         ttl_seconds: Optional[float] = None,
+        max_entries: int = DEFAULT_MAX_CACHE_ENTRIES,
         opener: Optional[urllib.request.OpenerDirector] = None,
     ) -> None:
+        if isinstance(max_entries, bool) or not isinstance(max_entries, int) or max_entries < 1:
+            raise ValueError("max_entries must be a positive integer")
         self.version = version
         self.api_url = api_url.rstrip("/")
         self._default_ttl_ms = 0.0 if ttl_seconds is None else float(ttl_seconds) * 1000.0
-        self._cache: dict[str, tuple[Flag, float]] = {}
+        self._max_entries = max_entries
+        # Least recently used first; a hit moves its entry to the end.
+        self._cache: OrderedDict[str, tuple[Flag, float]] = OrderedDict()
+        self._cache_lock = threading.Lock()
         self._opener = opener or urllib.request.build_opener()
 
     def get_flag(
@@ -108,12 +121,14 @@ class Client:
         cache_key = ""
         if effective_ttl_ms > 0:
             cache_key = _cache_key(flag_id, params)
-            entry = self._cache.get(cache_key)
-            if entry is not None:
-                flag, expires_at = entry
-                if expires_at > time.time() * 1000.0:
-                    return Flag(name=flag.name, enabled=flag.enabled, id=flag.id)
-                del self._cache[cache_key]
+            with self._cache_lock:
+                entry = self._cache.get(cache_key)
+                if entry is not None:
+                    flag, expires_at = entry
+                    if expires_at > time.time() * 1000.0:
+                        self._cache.move_to_end(cache_key)
+                        return Flag(name=flag.name, enabled=flag.enabled, id=flag.id)
+                    del self._cache[cache_key]
 
         request = urllib.request.Request(url, method="GET")
         try:
@@ -139,7 +154,11 @@ class Client:
 
         flag = _validate_flag(payload)
         if effective_ttl_ms > 0:
-            self._cache[cache_key] = (flag, time.time() * 1000.0 + effective_ttl_ms)
+            with self._cache_lock:
+                self._cache.pop(cache_key, None)
+                if len(self._cache) >= self._max_entries:
+                    self._cache.popitem(last=False)
+                self._cache[cache_key] = (flag, time.time() * 1000.0 + effective_ttl_ms)
         return flag
 
 
@@ -147,6 +166,7 @@ def create_client(
     version: str = DEFAULT_VERSION,
     api_url: str = DEFAULT_API_URL,
     ttl_seconds: Optional[float] = None,
+    max_entries: int = DEFAULT_MAX_CACHE_ENTRIES,
 ) -> Client:
-    """Create a client. Signature matches Node's createRocketflagClient(version, apiUrl, { ttlSeconds })."""
-    return Client(version, api_url, ttl_seconds=ttl_seconds)
+    """Create a client. Matches Node's createRocketflagClient(version, apiUrl, { ttlSeconds, maxEntries })."""
+    return Client(version, api_url, ttl_seconds=ttl_seconds, max_entries=max_entries)
