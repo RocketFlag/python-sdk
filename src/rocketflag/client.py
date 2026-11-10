@@ -24,6 +24,8 @@ from .errors import APIError, InvalidResponseError, NetworkError
 DEFAULT_API_URL = "https://api.rocketflag.app"
 DEFAULT_VERSION = "v1"
 DEFAULT_MAX_CACHE_ENTRIES = 10_000
+DEFAULT_TIMEOUT_SECONDS = 10.0
+MAX_RESPONSE_BYTES = 1_048_576
 _ENV_NAME = re.compile(r"[A-Za-z0-9_-]+")
 
 ContextValue = Union[str, int, float, bool]
@@ -83,17 +85,24 @@ class Client:
         *,
         ttl_seconds: Optional[float] = None,
         max_entries: int = DEFAULT_MAX_CACHE_ENTRIES,
+        timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
         opener: Optional[urllib.request.OpenerDirector] = None,
     ) -> None:
         if isinstance(max_entries, bool) or not isinstance(max_entries, int) or max_entries < 1:
             raise ValueError("max_entries must be a positive integer")
-        self.version = version
-        self.api_url = api_url.rstrip("/")
+        cleaned_url = api_url.rstrip("/")
+        parsed_url = urllib.parse.urlparse(cleaned_url)
+        if parsed_url.scheme not in ("http", "https") or not parsed_url.netloc:
+            raise ValueError("api_url must use http:// or https://")
+        self.version = version.strip("/")
+        self.api_url = cleaned_url
         self._default_ttl_ms = 0.0 if ttl_seconds is None else float(ttl_seconds) * 1000.0
         self._max_entries = max_entries
+        self._timeout_seconds = float(timeout_seconds)
         # Least recently used first; a hit moves its entry to the end.
         self._cache: OrderedDict[str, tuple[Flag, float]] = OrderedDict()
         self._cache_lock = threading.Lock()
+        self._uses_default_opener = opener is None
         self._opener = opener or urllib.request.build_opener()
 
     def get_flag(
@@ -107,6 +116,8 @@ class Client:
             raise ValueError("flagId is required")
         if not isinstance(flag_id, str):
             raise TypeError("flagId must be a string")
+        if flag_id in (".", "..") or "/" in flag_id or "\\" in flag_id:
+            raise ValueError("flagId must not contain path separators or relative segments")
 
         context: UserContext = user_context or {}
         if not isinstance(context, Mapping):
@@ -132,12 +143,22 @@ class Client:
 
         request = urllib.request.Request(url, method="GET")
         try:
-            with self._opener.open(request) as response:
+            open_ctx = (
+                self._opener.open(request, timeout=self._timeout_seconds)
+                if self._uses_default_opener
+                else self._opener.open(request)
+            )
+            with open_ctx as response:
                 status = getattr(response, "status", None) or response.getcode()
                 if status != 200:
                     status_text = getattr(response, "reason", "") or ""
                     raise APIError(f"API request failed with status {status}", status, status_text)
-                raw = response.read()
+                try:
+                    raw = response.read(MAX_RESPONSE_BYTES + 1)
+                except TypeError:
+                    raw = response.read()
+                if len(raw) > MAX_RESPONSE_BYTES:
+                    raise InvalidResponseError("Response body exceeds maximum size")
         except APIError:
             raise
         except urllib.error.HTTPError as exc:
