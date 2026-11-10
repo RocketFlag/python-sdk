@@ -264,3 +264,19 @@ def test_network_error():
     client = create_client(api_url="http://127.0.0.1:1")
     with pytest.raises(NetworkError):
         client.get_flag("abc123")
+
+
+@pytest.mark.parametrize("bad_id", [".", "..", "../admin", "a/b", "a\\b"])
+def test_rejects_traversal_and_slash_flag_ids(bad_id):
+    opener = StubOpener()
+    client = Client(opener=opener)
+    with pytest.raises(ValueError, match="flagId must not contain path separators or relative segments"):
+        client.get_flag(bad_id)
+    assert opener.urls == []
+
+
+@pytest.mark.parametrize("bad_url", ["file:///etc/passwd", "ftp://example.com", "javascript:alert(1)"])
+def test_rejects_non_http_api_urls(bad_url):
+    with pytest.raises(ValueError, match="api_url must use http:// or https://"):
+        Client(api_url=bad_url)
+
