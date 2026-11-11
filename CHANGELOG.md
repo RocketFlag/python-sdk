@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.1
+
+- Validate and path-escape `flag_id` values (rejecting dot segments `.` / `..`, slashes, whitespace, and control characters) and validate `api_url` schemes (`http` / `https` only).
+- Set a default HTTP request timeout of `5.0` seconds (`timeout` option on `Client` and `create_client`) and cap response bodies to 64 KiB.
+
 ## 0.2.0
 
 - Sticky percentage rollouts and audiences: `targetingKey` and audience attributes are documented, and `UserContext` / `ContextValue` are exported for type hints.

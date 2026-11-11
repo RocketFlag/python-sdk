@@ -27,4 +27,4 @@ __all__ = [
     "create_client",
 ]
 
-__version__ = "0.2.0"
+__version__ = "0.2.1"
